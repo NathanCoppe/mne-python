@@ -1,4 +1,5 @@
-"""Dynamic Imaging of Coherent Sources (DICS)."""
+"""Dynamic Imaging of Coherent Sources (DICS).
+"""
 
 # Authors: Roman Goj <roman.goj@gmail.com>
 #
@@ -8,12 +9,13 @@ from copy import deepcopy
 
 import numpy as np
 from scipy import linalg
+from scipy.sparse import csr_matrix
 
 from ..utils import logger, verbose, warn
 from ..forward import _subject_from_forward
 from ..minimum_norm.inverse import combine_xyz, _check_reference
 from ..source_estimate import _make_stc
-from ..time_frequency import CrossSpectralDensity, csd_epochs
+from ..time_frequency import CrossSpectralDensity, compute_epochs_csd
 from ._lcmv import _prepare_beamformer_input, _setup_picks
 from ..externals import six
 
@@ -53,14 +55,14 @@ def _apply_dics(data, info, tmin, forward, noise_csd, data_csd, reg,
         If 'normal', rather than pooling the orientations by taking the norm,
         only the radial component is kept.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see :func:`mne.verbose`
-        and :ref:`Logging documentation <tut_logging>` for more).
+        If not None, override default verbose level (see mne.verbose).
 
     Returns
     -------
     stc : SourceEstimate | VolSourceEstimate
         Source time courses
     """
+
     is_free_ori, _, proj, vertno, G =\
         _prepare_beamformer_input(info, forward, label, picks, pick_ori)
 
@@ -170,8 +172,7 @@ def dics(evoked, forward, noise_csd, data_csd, reg=0.01, label=None,
         If 'normal', rather than pooling the orientations by taking the norm,
         only the radial component is kept.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see :func:`mne.verbose`
-        and :ref:`Logging documentation <tut_logging>` for more).
+        If not None, override default verbose level (see mne.verbose).
 
     Returns
     -------
@@ -237,8 +238,7 @@ def dics_epochs(epochs, forward, noise_csd, data_csd, reg=0.01, label=None,
         Return a generator object instead of a list. This allows iterating
         over the stcs without having to keep them all in memory.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see :func:`mne.verbose`
-        and :ref:`Logging documentation <tut_logging>` for more).
+        If not None, override default verbose level (see mne.verbose).
 
     Returns
     -------
@@ -271,19 +271,15 @@ def dics_epochs(epochs, forward, noise_csd, data_csd, reg=0.01, label=None,
 
     return stcs
 
-
 @verbose
 def dics_source_power(info, forward, noise_csds, data_csds, reg=0.01,
                       label=None, pick_ori=None, verbose=None):
     """Dynamic Imaging of Coherent Sources (DICS).
-
     Calculate source power in time and frequency windows specified in the
     calculation of the data cross-spectral density matrix or matrices. Source
     power is normalized by noise power.
-
     NOTE : This implementation has not been heavily tested so please
     report any issues or suggestions.
-
     Parameters
     ----------
     info : dict
@@ -304,20 +300,18 @@ def dics_source_power(info, forward, noise_csds, data_csds, reg=0.01,
         If 'normal', rather than pooling the orientations by taking the norm,
         only the radial component is kept.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see :func:`mne.verbose`
-        and :ref:`Logging documentation <tut_logging>` for more).
-
+        If not None, override default verbose level (see mne.verbose).
     Returns
     -------
     stc : SourceEstimate | VolSourceEstimate
         Source power with frequency instead of time.
-
     Notes
     -----
     The original reference is:
     Gross et al. Dynamic imaging of coherent sources: Studying neural
     interactions in the human brain. PNAS (2001) vol. 98 (2) pp. 694-699
     """
+
     if isinstance(data_csds, CrossSpectralDensity):
         data_csds = [data_csds]
 
@@ -414,6 +408,191 @@ def dics_source_power(info, forward, noise_csds, data_csds, reg=0.01,
     logger.info('[done]')
 
     subject = _subject_from_forward(forward)
+    return _make_stc(source_power, vertices=vertno, tmin=fmin / 1000., 
+                     tstep=fstep / 1000., subject=subject)
+
+@verbose
+def dics_source_power_bis(info, forward, csds, avg_csds=None, reg=0.01, label=None, pick_ori=None, 
+                          verbose=None):
+    """Dynamic Imaging of Coherent Sources (DICS).
+
+    Calculate source power in time and frequency windows specified in the
+    calculation of the data cross-spectral density matrix or matrices. 
+
+    NOTE : This implementation has not been heavily tested so please
+    report any issues or suggestions.
+
+    Parameters
+    ----------
+    info : dict
+        Measurement info, e.g. epochs.info.
+    forward : dict
+        Forward operator.
+    csds : instance or list of instances of CrossSpectralDensity
+        The data cross-spectral density matrix for a single frequency or a list
+        of matrices for multiple frequencies.
+    avg_csds : instance or list of instances of CrossSpectralDensity
+        The cross-spectral density matrix averaged on epochs and tapers for a single or
+        multiple frequencies.
+    reg : float
+        The regularization for the cross-spectral density.
+    label : Label | None
+        Restricts the solution to a given label.
+    pick_ori : None | 'normal'
+        If 'normal', rather than pooling the orientations by taking the norm,
+        only the radial component is kept.
+    verbose : bool, str, int, or None
+        If not None, override default verbose level (see mne.verbose).
+
+    Returns
+    -------
+    stc : SourceEstimate | VolSourceEstimate
+        Source power with frequency instead of time.
+
+    Notes
+    -----
+    The original reference is:
+    Gross et al. Dynamic imaging of coherent sources: Studying neural
+    interactions in the human brain. PNAS (2001) vol. 98 (2) pp. 694-699
+    """
+
+    if isinstance(csds, CrossSpectralDensity):
+        csds = [csds]
+
+    def csd_shapes(x):
+        return tuple(c.data.shape for c in x)
+
+	
+    if len(set(csd_shapes(csds))) > 1:
+        raise ValueError('One noise CSD matrix should be provided for each '
+                         'data CSD matrix and vice versa. All CSD matrices '
+                         'should have identical shape.')
+
+    frequencies = []
+    for csd in csds:
+
+        # If CSD is summed over multiple frequencies, take the average
+        # frequency
+        if(len(csd.frequencies) > 1):
+            frequencies.append(np.mean(csd.frequencies))
+        else:
+            frequencies.append(csd.frequencies[0])
+    fmin = frequencies[0]
+
+    if len(frequencies) > 2:
+        fstep = []
+        for i in range(len(frequencies) - 1):
+            fstep.append(frequencies[i + 1] - frequencies[i])
+        if not np.allclose(fstep, np.mean(fstep), 1e-5):
+            warn('Uneven frequency spacing in CSD object, frequencies in the '
+                 'resulting stc file will be inaccurate.')
+        fstep = fstep[0]
+    elif len(frequencies) > 1:
+        fstep = frequencies[1] - frequencies[0]
+    else:
+        fstep = 1  # dummy value
+
+    picks = _setup_picks(picks=None, info=info, forward=forward)
+
+    is_free_ori, _, proj, vertno, G =\
+        _prepare_beamformer_input(info, forward, label, picks=picks,  
+                                  pick_ori=pick_ori)
+                                  
+    n_orient = 3 if is_free_ori else 1
+    
+    n_sources = G.shape[1] // n_orient
+    
+    n_channels = G.shape[0]
+    
+    data = csds[0].data
+    
+    n_shape = data.ndim
+    
+    n_epochs = 1 if (n_shape==2) else data.shape[-1]
+    
+    source_power = np.zeros((n_sources, len(csds), n_epochs))
+    
+    n_csds = len(csds)
+    
+    if n_shape != 2:
+        if avg_csds is None:
+            raise Exception ('avg_csds must not be None')
+        Cm_avg = avg_csds
+		
+    else:
+        Cm_avg = csds
+        
+    logger.info('Computing DICS source power...')
+    for i, csd in enumerate(csds):
+            
+        if n_csds > 1:
+            logger.info('    computing DICS spatial filter %d out of %d' %
+                        (i + 1, n_csds))
+
+        Cm = csd.data
+        Cm_avg = Cm_avg[i].data.real
+        
+        # add dimensions
+        while  Cm.ndim < 4:
+            Cm = Cm[..., None]
+             
+
+        # Calculating regularized inverse, equivalent to an inverse operation
+        # after the following regularization:
+        # Cm += reg * np.trace(Cm) / len(Cm) * np.eye(len(Cm))
+        Cm_inv = linalg.pinv(Cm_avg, reg)
+        
+        # compute filter
+        def filter(Lf, invC):
+            return linalg.pinv(Lf.T.dot(invC).dot(Lf)).dot(Lf.T).dot(invC)
+        
+        # spatial filter
+        W = np.zeros((n_sources, n_channels))
+    
+        for k in range(n_sources):
+            Gk = G[:, n_orient * k: n_orient * k + n_orient]
+            Wk = filter(Gk, Cm_inv)
+        
+            if is_free_ori:
+                # Free source orientation
+                u, _, _ = linalg.svd(Wk.dot(Cm_avg).dot(Wk.T))
+                max_power = u[:,0]
+					
+                # combining the three orthogonal filters in the 
+                # direction of maximum variance.
+                Gk = Gk.dot(max_power)[:,np.newaxis]
+            
+                # new computing filter to reduce dimension
+                Wk = filter(Gk, Cm_inv)         
+            W[k] = Wk
+            
+        
+        # dimension : (n_trials, n_channels, n_channels, dim_tapers)
+        Cm = np.transpose(Cm, axes=[3,0,1,2]).real
+		
+        for num_taper in range(Cm.shape[-1]):
+        
+            Cm_cour = Cm[..., num_taper]
+            Cm_cour = np.diagonal(Cm_cour, axis1=1, axis2=2).T
+            
+            sp_temp = W.dot(Cm_cour)
+            sp_temp = sp_temp*sp_temp.conj()
+            
+            source_power[:,i, :] += sp_temp
+        source_power[:,i, :] /= Cm.shape[-1]
+            
+    source_power= np.abs(source_power)
+       
+    logger.info('[done]')
+  
+
+    subject = _subject_from_forward(forward)
+
+    source_power = source_power.squeeze()    
+    
+    if source_power.ndim==1:
+        source_power=np.expand_dims(source_power, axis=-1)
+    
     return _make_stc(source_power, vertices=vertno, tmin=fmin / 1000.,
                      tstep=fstep / 1000., subject=subject)
 
@@ -478,8 +657,7 @@ def tf_dics(epochs, forward, noise_csds, tmin, tmax, tstep, win_lengths,
         If 'normal', rather than pooling the orientations by taking the norm,
         only the radial component is kept.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see :func:`mne.verbose`
-        and :ref:`Logging documentation <tut_logging>` for more).
+        If not None, override default verbose level (see mne.verbose).
 
     Returns
     -------
@@ -566,13 +744,13 @@ def tf_dics(epochs, forward, noise_csds, tmin, tmax, tstep, win_lengths,
                 win_tmax = win_tmax + 1e-10
 
                 # Calculating data CSD in current time window
-                data_csd = csd_epochs(epochs, mode=mode,
-                                      fmin=freq_bin[0],
-                                      fmax=freq_bin[1], fsum=True,
-                                      tmin=win_tmin, tmax=win_tmax,
-                                      n_fft=n_fft,
-                                      mt_bandwidth=mt_bandwidth,
-                                      mt_low_bias=mt_low_bias)
+                data_csd = compute_epochs_csd(epochs, mode=mode,
+                                              fmin=freq_bin[0],
+                                              fmax=freq_bin[1], fsum=True,
+                                              tmin=win_tmin, tmax=win_tmax,
+                                              n_fft=n_fft,
+                                              mt_bandwidth=mt_bandwidth,
+                                              mt_low_bias=mt_low_bias)
 
                 # Scale data CSD to allow data and noise CSDs to have different
                 # length

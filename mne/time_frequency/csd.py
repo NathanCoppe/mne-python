@@ -12,12 +12,12 @@ from ..utils import logger, verbose, warn
 from ..time_frequency.multitaper import (dpss_windows, _mt_spectra,
                                          _csd_from_mt, _psd_from_mt_adaptive)
 
+from ..utils import deprecated
 from ..externals.six.moves import xrange as range
 
 
 class CrossSpectralDensity(object):
-    """Cross-spectral density.
-
+    """Cross-spectral density
     Parameters
     ----------
     data : array of shape (n_channels, n_channels)
@@ -34,9 +34,7 @@ class CrossSpectralDensity(object):
     n_fft : int
         Length of the FFT used when calculating the CSD matrix.
     """
-
-    def __init__(self, data, ch_names, projs, bads, frequencies,
-                 n_fft):  # noqa: D102
+    def __init__(self, data, ch_names, projs, bads, frequencies, n_fft):
         self.data = data
         self.dim = len(data)
         self.ch_names = cp.deepcopy(ch_names)
@@ -45,26 +43,37 @@ class CrossSpectralDensity(object):
         self.frequencies = np.atleast_1d(np.copy(frequencies))
         self.n_fft = n_fft
 
-    def __repr__(self):  # noqa: D105
+    def __repr__(self):
         s = 'frequencies : %s' % self.frequencies
         s += ', size : %s x %s' % self.data.shape
         s += ', data : %s' % self.data
         return '<CrossSpectralDensity  |  %s>' % s
 
 
+@deprecated(("compute_epochs_csd has been deprecated and will be removed in "
+             "0.14, use csd_epochs instead."))
+@verbose
+def compute_epochs_csd(epochs, mode='multitaper', fmin=0, fmax=np.inf,
+                       fsum=True, tmin=None, tmax=None, n_fft=None,
+                       mt_bandwidth=None, mt_adaptive=False, mt_low_bias=True,
+                       projs=None, verbose=None):
+    return csd_epochs(epochs, mode=mode, fmin=fmin, fmax=fmax,
+                      fsum=fsum, tmin=tmin, tmax=tmax, n_fft=n_fft,
+                      mt_bandwidth=mt_bandwidth, mt_adaptive=mt_adaptive,
+                      mt_low_bias=mt_low_bias, projs=projs, avg_tapers=True, 
+                      on_epochs=True, verbose=verbose)
+
+
 @verbose
 def csd_epochs(epochs, mode='multitaper', fmin=0, fmax=np.inf,
                fsum=True, tmin=None, tmax=None, n_fft=None,
                mt_bandwidth=None, mt_adaptive=False, mt_low_bias=True,
-               projs=None, verbose=None):
-    """Estimate cross-spectral density from epochs.
-
+               projs=None, avg_tapers=True, on_epochs=True, verbose=None):
+    """Estimate cross-spectral density from epochs
     Note: Baseline correction should be used when creating the Epochs.
           Otherwise the computed cross-spectral density will be inaccurate.
-
     Note: Results are scaled by sampling frequency for compatibility with
           Matlab.
-
     Parameters
     ----------
     epochs : instance of Epochs
@@ -100,9 +109,7 @@ def csd_epochs(epochs, mode='multitaper', fmin=0, fmax=np.inf,
         List of projectors to use in CSD calculation, or None to indicate that
         the projectors from the epochs should be inherited.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see :func:`mne.verbose`
-        and :ref:`Logging documentation <tut_logging>` for more).
-
+        If not None, override default verbose level (see mne.verbose).
     Returns
     -------
     csd : instance of CrossSpectralDensity
@@ -163,20 +170,30 @@ def csd_epochs(epochs, mode='multitaper', fmin=0, fmax=np.inf,
     window_fun, eigvals, n_tapers, mt_adaptive = _compute_csd_params(
         n_times, sfreq, mode, mt_bandwidth, mt_low_bias, mt_adaptive)
 
-    csds_mean = np.zeros((len(ch_names), len(ch_names), n_freqs),
-                         dtype=complex)
+    #csds_mean = np.zeros((len(ch_names), len(ch_names), n_freqs),
+    #                     dtype=complex)
+
+    dim_epochs=1 if on_epochs else len(epochs)
+    dim_tapers= 1 if avg_tapers else n_tapers
+    
+    n_channels= len(ch_names)
+    
+    csds = np.zeros((n_channels, n_channels, n_freqs, dim_tapers, dim_epochs), dtype=complex)
 
     # Picking frequencies of interest
     freq_mask_mt = freq_mask[orig_frequencies >= 0]
 
     # Compute CSD for each epoch
     n_epochs = 0
-    for epoch in epochs:
+    for i, epoch in enumerate(epochs):
         epoch = epoch[picks_meeg][:, tslice]
 
         # Calculating Fourier transform using multitaper module
         csds_epoch = _csd_array(epoch, sfreq, window_fun, eigvals, freq_mask,
-                                freq_mask_mt, n_fft, mode, mt_adaptive)
+                                freq_mask_mt, n_fft, mode, mt_adaptive, avg_tapers)
+        
+        if avg_tapers:      
+            csds_epoch = csds_epoch[..., np.newaxis]
 
         # Scaling by number of samples and compensating for loss of power due
         # to windowing (see section 11.5.2 in Bendat & Piersol).
@@ -187,29 +204,36 @@ def csd_epochs(epochs, mode='multitaper', fmin=0, fmax=np.inf,
         # Scaling by sampling frequency for compatibility with Matlab
         csds_epoch /= sfreq
 
-        csds_mean += csds_epoch
-        n_epochs += 1
+        if on_epochs:
+            csds[...,0] += csds_epoch
+            n_epochs += 1
+        else:
+            csds[...,i] += csds_epoch
 
-    csds_mean /= n_epochs
+    if on_epochs:
+        csds /= n_epochs
 
     logger.info('[done]')
+    
+    if on_epochs and avg_tapers:
+        csds = csds[...,0,0]
 
     # Summing over frequencies of interest or returning a list of separate CSD
     # matrices for each frequency
     if fsum is True:
-        csd_mean_fsum = np.sum(csds_mean, 2)
+        csd_mean_fsum = np.sum(csds, 2)
         csd = CrossSpectralDensity(csd_mean_fsum, ch_names, projs,
                                    epochs.info['bads'],
                                    frequencies=frequencies, n_fft=n_fft)
         return csd
     else:
-        csds = []
+        csds_freq = []
         for i in range(n_freqs):
-            csds.append(CrossSpectralDensity(csds_mean[:, :, i], ch_names,
-                                             projs, epochs.info['bads'],
-                                             frequencies=frequencies[i],
-                                             n_fft=n_fft))
-        return csds
+            csds_freq.append(CrossSpectralDensity(csds[:, :, i], ch_names,
+                             projs, epochs.info['bads'],
+                             frequencies=frequencies[i],
+                             n_fft=n_fft))
+        return csds_freq
 
 
 @verbose
@@ -217,10 +241,8 @@ def csd_array(X, sfreq, mode='multitaper', fmin=0, fmax=np.inf,
               fsum=True, n_fft=None, mt_bandwidth=None,
               mt_adaptive=False, mt_low_bias=True, verbose=None):
     """Estimate cross-spectral density from an array.
-
     .. note:: Results are scaled by sampling frequency for compatibility with
               Matlab.
-
     Parameters
     ----------
     X : array-like, shape (n_replicates, n_series, n_times)
@@ -254,15 +276,15 @@ def csd_array(X, sfreq, mode='multitaper', fmin=0, fmax=np.inf,
         Only use tapers with more than 90% spectral concentration within
         bandwidth. Only used in 'multitaper' mode.
     verbose : bool, str, int, or None
-        If not None, override default verbose level (see :func:`mne.verbose`).
-
+        If not None, override default verbose level (see mne.verbose).
     Returns
     -------
     csd : array, shape (n_freqs, n_series, n_series) if fsum is True, otherwise (n_series, n_series).
         The computed cross spectral-density (either summed or not).
     freqs : array
         Frequencies the cross spectral-density is evaluated at.
-    """  # noqa: E501
+    """  # noqa
+
     # Check correctness of input data and parameters
     if fmax < fmin:
         raise ValueError('fmax must be larger than fmin')
@@ -325,8 +347,7 @@ def csd_array(X, sfreq, mode='multitaper', fmin=0, fmax=np.inf,
 
 def _compute_csd_params(n_times, sfreq, mode, mt_bandwidth, mt_low_bias,
                         mt_adaptive):
-    """Compute windowing and multitaper parameters.
-
+    """ Auxliary function to compute windowing and multitaper parameters.
     Parameters
     ----------
     n_times : int
@@ -344,7 +365,6 @@ def _compute_csd_params(n_times, sfreq, mode, mt_bandwidth, mt_low_bias,
     mt_adaptive : bool
         Use adaptive weights to combine the tapered spectra into PSD.
         Only used in 'multitaper' mode.
-
     Returns
     -------
     window_fun : array
@@ -393,11 +413,10 @@ def _compute_csd_params(n_times, sfreq, mode, mt_bandwidth, mt_low_bias,
 
 
 def _csd_array(x, sfreq, window_fun, eigvals, freq_mask, freq_mask_mt, n_fft,
-               mode, mt_adaptive):
-    """Calculate Fourier transform using multitaper module.
-
-    The arguments correspond to the values in `compute_csd_epochs` and
-    `csd_array`.
+               mode, mt_adaptive, avg_tapers=True):
+    """ Calculating Fourier transform using multitaper module.
+        The arguments correspond to the values in `compute_csd_epochs` and
+        `csd_array`.
     """
     x_mt, _ = _mt_spectra(x, window_fun, sfreq, n_fft)
 
@@ -417,11 +436,14 @@ def _csd_array(x, sfreq, window_fun, eigvals, freq_mask, freq_mask_mt, n_fft,
             weights = np.array([1.])[:, np.newaxis, np.newaxis, np.newaxis]
 
     x_mt = x_mt[:, :, freq_mask_mt]
-
+        
     # Calculating CSD
     # Tiling x_mt so that we can easily use _csd_from_mt()
     x_mt = x_mt[:, np.newaxis, :, :]
     x_mt = np.tile(x_mt, [1, x_mt.shape[0], 1, 1])
+    if not avg_tapers :
+        return np.transpose(x_mt, axes=[0,1,3,2])
+		
     y_mt = np.transpose(x_mt, axes=[1, 0, 2, 3])
     weights_y = np.transpose(weights, axes=[1, 0, 2, 3])
     csds = _csd_from_mt(x_mt, y_mt, weights, weights_y)
