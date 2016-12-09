@@ -15,7 +15,7 @@ from ..utils import logger, verbose, warn
 from ..forward import _subject_from_forward
 from ..minimum_norm.inverse import combine_xyz, _check_reference
 from ..source_estimate import _make_stc
-from ..time_frequency import CrossSpectralDensity, compute_epochs_csd
+from ..time_frequency import CrossSpectralDensity, csd_epochs
 from ._lcmv import _prepare_beamformer_input, _setup_picks
 from ..externals import six
 
@@ -412,7 +412,7 @@ def dics_source_power(info, forward, noise_csds, data_csds, reg=0.01,
                      tstep=fstep / 1000., subject=subject)
 
 @verbose
-def dics_source_power_bis(info, forward, csds, avg_csds=None, reg=0.01, label=None, pick_ori=None, 
+def dics_source_power_bis(info, forward, csds, avg_csds, reg=0.05, label=None, pick_ori=None,
                           verbose=None):
     """Dynamic Imaging of Coherent Sources (DICS).
 
@@ -503,7 +503,8 @@ def dics_source_power_bis(info, forward, csds, avg_csds=None, reg=0.01, label=No
     n_sources = G.shape[1] // n_orient
     
     n_channels = G.shape[0]
-    
+
+    # Single trial csd for all tapers and trials (similar to Xsens in Fieldtrip)
     data = csds[0].data
     
     n_shape = data.ndim
@@ -516,7 +517,7 @@ def dics_source_power_bis(info, forward, csds, avg_csds=None, reg=0.01, label=No
     
     if n_shape != 2:
         if avg_csds is None:
-            raise Exception ('avg_csds must not be None')
+            raise Exception ('Average CSD is missing, please provide avg_csds')
         Cm_avg = avg_csds
 		
     else:
@@ -529,9 +530,12 @@ def dics_source_power_bis(info, forward, csds, avg_csds=None, reg=0.01, label=No
             logger.info('    computing DICS spatial filter %d out of %d' %
                         (i + 1, n_csds))
 
-        Cm = csd.data
+        # Take the real part of the cas to get real filter
         Cm_avg = Cm_avg[i].data.real
-        
+
+        # Take csd for single trials and tapers (Xsens full version)
+        Cm = csd.data
+
         # add dimensions
         while  Cm.ndim < 4:
             Cm = Cm[..., None]
@@ -542,11 +546,11 @@ def dics_source_power_bis(info, forward, csds, avg_csds=None, reg=0.01, label=No
         # Cm += reg * np.trace(Cm) / len(Cm) * np.eye(len(Cm))
         Cm_inv = linalg.pinv(Cm_avg, reg)
         
-        # compute filter
+        # Compute DICS filter
         def filter(Lf, invC):
             return linalg.pinv(Lf.T.dot(invC).dot(Lf)).dot(Lf.T).dot(invC)
         
-        # spatial filter
+        # DICS spatial filter
         W = np.zeros((n_sources, n_channels))
     
         for k in range(n_sources):
@@ -558,7 +562,7 @@ def dics_source_power_bis(info, forward, csds, avg_csds=None, reg=0.01, label=No
                 u, _, _ = linalg.svd(Wk.dot(Cm_avg).dot(Wk.T))
                 max_power = u[:,0]
 					
-                # combining the three orthogonal filters in the 
+                # Combining the three orthogonal filters in the
                 # direction of maximum variance.
                 Gk = Gk.dot(max_power)[:,np.newaxis]
             
@@ -567,24 +571,23 @@ def dics_source_power_bis(info, forward, csds, avg_csds=None, reg=0.01, label=No
             W[k] = Wk
             
         
-        # dimension : (n_trials, n_channels, n_channels, dim_tapers)
-        Cm = np.transpose(Cm, axes=[3,0,1,2]).real
+        # Xsens: complex values (n_trials, n_channels, n_channels, dim_tapers)
+        Cm = np.transpose(Cm, axes=[3,0,1,2])
 		
         for num_taper in range(Cm.shape[-1]):
         
             Cm_cour = Cm[..., num_taper]
             Cm_cour = np.diagonal(Cm_cour, axis1=1, axis2=2).T
-            
+            # Xsource = A * Xsens , where A is the DICS filter and Xsens is the spectral estimate at the sensor level complex values
             sp_temp = W.dot(Cm_cour)
+            # Power = Xsource * conj(Xsource)
             sp_temp = sp_temp*sp_temp.conj()
-            
-            source_power[:,i, :] += sp_temp
-        source_power[:,i, :] /= Cm.shape[-1]
-            
-    source_power= np.abs(source_power)
-       
+            # Sum source power estimates across tapers and take abs to remove complex part
+            source_power[:,i,:] += np.abs(sp_temp)
+
+        source_power[:,i,:] /= Cm.shape[-1]
+
     logger.info('[done]')
-  
 
     subject = _subject_from_forward(forward)
 

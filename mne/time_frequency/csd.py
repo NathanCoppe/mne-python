@@ -173,8 +173,8 @@ def csd_epochs(epochs, mode='multitaper', fmin=0, fmax=np.inf,
     #csds_mean = np.zeros((len(ch_names), len(ch_names), n_freqs),
     #                     dtype=complex)
 
-    dim_epochs=1 if on_epochs else len(epochs)
-    dim_tapers= 1 if avg_tapers else n_tapers
+    dim_epochs = 1 if on_epochs else len(epochs)
+    dim_tapers = 1 if avg_tapers else n_tapers
     
     n_channels= len(ch_names)
     
