@@ -373,10 +373,15 @@ def dics_source_power(info, forward, noise_csds, data_csds, reg=0.01,
 
         Cm = data_csd.data
 
-        # Calculating regularized inverse, equivalent to an inverse operation
-        # after the following regularization:
-        # Cm += reg * np.trace(Cm) / len(Cm) * np.eye(len(Cm))
-        Cm_inv = linalg.pinv(Cm, reg)
+        # Take the real part of the cross spectral matrix to get real filter
+        Cm = Cm.real
+
+        # Tikhonov regularization using reg parameter to control for trade-off between spatial resolution and noise sensitivity
+        # eq. 25 in Gross and Ioannides, 1999 Phys. Med. Biol. 44 2081
+        Cm += reg * np.trace(Cm) / len(Cm) * np.eye(len(Cm))
+
+        # Compute pseudoinverse of Cm
+        Cm_inv = linalg.pinv(Cm)
 
         # Compute spatial filters
         W = np.dot(G.T, Cm_inv)
@@ -408,7 +413,7 @@ def dics_source_power(info, forward, noise_csds, data_csds, reg=0.01,
     logger.info('[done]')
 
     subject = _subject_from_forward(forward)
-    return _make_stc(source_power, vertices=vertno, tmin=fmin / 1000., 
+    return _make_stc(source_power, vertices=vertno, tmin=fmin / 1000.,
                      tstep=fstep / 1000., subject=subject)
 
 @verbose
@@ -426,6 +431,10 @@ def dics_source_power_bis(info, forward, csds, avg_csds, reg=0.05, label=None, p
     ----------
     info : dict
         Measurement info, e.g. epochs.info.
+    tmin : float
+        Time point at the centre of the window of interest for csd
+    tstep : float
+        Time step between wondows of interest for csd
     forward : dict
         Forward operator.
     csds : instance or list of instances of CrossSpectralDensity
@@ -539,13 +548,15 @@ def dics_source_power_bis(info, forward, csds, avg_csds, reg=0.05, label=None, p
         # add dimensions
         while  Cm.ndim < 4:
             Cm = Cm[..., None]
-             
 
-        # Calculating regularized inverse, equivalent to an inverse operation
-        # after the following regularization:
-        # Cm += reg * np.trace(Cm) / len(Cm) * np.eye(len(Cm))
-        Cm_inv = linalg.pinv(Cm_avg, reg)
-        
+        # Tikhonov regularization using reg parameter to control for trade-off
+        # between spatial resolution and noise sensitivity
+        # eq. 25 in Gross and Ioannides, 1999 Phys. Med. Biol. 44 2081
+        Cm_avg += reg * np.trace(Cm_avg) / len(Cm_avg) * np.eye(len(Cm_avg))
+
+        # Compute pseudoinverse of Cm
+        Cm_inv = linalg.pinv(Cm_avg)
+
         # Compute DICS filter
         def filter(Lf, invC):
             return linalg.pinv(Lf.T.dot(invC).dot(Lf)).dot(Lf.T).dot(invC)
@@ -596,9 +607,7 @@ def dics_source_power_bis(info, forward, csds, avg_csds, reg=0.05, label=None, p
     if source_power.ndim==1:
         source_power=np.expand_dims(source_power, axis=-1)
     
-    return _make_stc(source_power, vertices=vertno, tmin=fmin / 1000.,
-                     tstep=fstep / 1000., subject=subject)
-
+    return source_power, vertno
 
 @verbose
 def tf_dics(epochs, forward, noise_csds, tmin, tmax, tstep, win_lengths,
