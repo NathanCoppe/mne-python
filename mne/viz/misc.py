@@ -348,7 +348,7 @@ def _plot_mri_contours(mri_fname, surfaces, src, orientation='coronal',
             in_slice = np.logical_and(sources[:, z] > sl - 0.5,
                                       sources[:, z] < sl + 0.5)
             ax.scatter(sources[in_slice, x], sources[in_slice, y], marker='.',
-                       color='#FF00FF', s=1, zorder=2)
+                       color='#FF00FF', s=30, zorder=2)
 
     plt.subplots_adjust(left=0., bottom=0., right=1., top=1., wspace=0.,
                         hspace=0.)

@@ -417,7 +417,7 @@ def dics_source_power(info, forward, noise_csds, data_csds, reg=0.01,
                      tstep=fstep / 1000., subject=subject)
 
 @verbose
-def dics_source_power_bis(info, forward, csds, avg_csds, reg=0.05, label=None, pick_ori=None,
+def dics_source_power_epochs(info, forward, csds, avg_csds, reg=0.05, label=None, pick_ori=None,
                           verbose=None):
     """Dynamic Imaging of Coherent Sources (DICS).
 
